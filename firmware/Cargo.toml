@@ -1,0 +1,26 @@
+[package]
+name = "nintendo-bridge"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+license = "MIT"
+
+[dependencies]
+esp-idf-svc = "=0.53.0"
+log = "0.4"
+enumset = "1"
+
+[build-dependencies]
+embuild = "0.33"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+
+[package.metadata.esp-idf-sys]
+esp_idf_version = "v5.5.4"
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+[[package.metadata.esp-idf-sys.extra_components]]
+bindings_header = "bindings.h"
+component_dirs = ["components/wii_link_policy"]
