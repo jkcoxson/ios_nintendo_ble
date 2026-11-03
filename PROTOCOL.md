@@ -137,10 +137,19 @@ command and fragment order within each slot.
 | 5: player order | permutation of slots 0...3 | 4 slot priorities, suspended-slot bitmap |
 | 6: disconnect remote | slot, 6-byte expected address | empty |
 | 7: connect remote | slot, 6-byte expected address | empty |
+| 8: remembered remote | roster index 0...6 | index, assigned slot or `ff`, 6-byte address, UTF-8 name |
+| 9: forget remote | roster index, 6-byte expected address | empty; bridge restarts after reply |
+| 10: rename remembered remote | roster index, 6-byte expected address, UTF-8 name | empty |
+| 11: power off remote | slot, 6-byte expected address | empty |
 
 Target `ff` identifies the bridge (six zero address bytes); 0...3 identifies a
 currently assigned Wii Remote, including sleeping remotes. Other remembered
 remotes receive a slot when they reconnect. Addresses are opaque bytes in ESP-IDF order.
+The remembered-remote command lists every saved identity, including those without an
+assigned slot. An empty roster index returns result 2. Forget removes the roster entry,
+slot assignment, saved name, and Bluetooth bond, then restarts the bridge to release
+the HID host's device entry. It disconnects active remotes during the restart. Rename
+and forget check the expected address so a stale UI cannot change another remote.
 Rename checks the expected address so stale slots cannot rename another remote. Names
 are nonblank, valid UTF-8, at most 24 bytes, without control characters. Names persist in
 NVS alongside bonds/slots. The bridge name is in the scan response; the service UUID is
@@ -151,10 +160,13 @@ or existing remotes. Status exposes the transition. Queued management requests/r
 are scoped to the originating BLE connection generation.
 
 
-The optional `0006` characteristic reads a capability bitfield (currently `[0x1f]`).
+The optional `0006` characteristic reads a capability bitfield (currently `[0x7f]`).
 Bit 0 identifies runtime player control (opcodes 4...7). Its presence lets clients
 hide those actions for older firmware without submitting unsupported commands.
 Result 4 reports a failed disconnect.
+Bit 6 identifies opcode 11. Power off ends the physical HID link after the
+emulated Wii disconnects. It keeps the Bluetooth bond and does not suspend the
+slot, so a normal button press can wake and reconnect the remote later.
 
 Player order maps player ports to the four current slot IDs. On each new
 connection, firmware swaps that slot into the lowest vacant port; established

@@ -380,7 +380,7 @@ impl Server {
                     let value = if handle == s.status {
                         self.status_value(s.extended_status)
                     } else if handle == s.capabilities {
-                        vec![31] // Player controls, wide, timestamps, batching, stable player status.
+                        vec![127] // Player controls, wide, timestamps, batching, stable status, roster, power off.
                     } else if handle == s.control_cccd {
                         vec![if s.control_subscribed { 2 } else { 0 }, 0]
                     } else if handle == s.input_cccd {

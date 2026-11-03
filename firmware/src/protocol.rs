@@ -516,6 +516,10 @@ pub enum ControlCommand {
     Disconnect(u8, [u8; 6]),
     Connect(u8, [u8; 6]),
     Rename(u8, [u8; 6], String),
+    Remembered(u8),
+    Forget(u8, [u8; 6]),
+    RenameRemembered(u8, [u8; 6], String),
+    PowerOff(u8, [u8; 6]),
 }
 pub fn valid_name(name: &str) -> bool {
     !name.trim().is_empty() && name.len() <= MAX_NAME_BYTES && !name.chars().any(char::is_control)
@@ -548,6 +552,22 @@ pub fn control_command(data: &[u8]) -> Option<(u16, ControlCommand)> {
                 ControlCommand::Connect(data[4], address)
             }
         }
+        8 if data.len() == 5 && data[4] < MAX_REMEMBERED_REMOTES as u8 => {
+            ControlCommand::Remembered(data[4])
+        }
+        9 if data.len() == 11 && data[4] < MAX_REMEMBERED_REMOTES as u8 => {
+            ControlCommand::Forget(data[4], data[5..11].try_into().ok()?)
+        }
+        10 if data.len() >= 12 && data[4] < MAX_REMEMBERED_REMOTES as u8 => {
+            let name = std::str::from_utf8(&data[11..]).ok()?;
+            if !valid_name(name) {
+                return None;
+            }
+            ControlCommand::RenameRemembered(data[4], data[5..11].try_into().ok()?, name.to_owned())
+        }
+        11 if data.len() == 11 && data[4] < 4 => {
+            ControlCommand::PowerOff(data[4], data[5..11].try_into().ok()?)
+        }
         _ => return None,
     };
     Some((id, command))
@@ -571,6 +591,19 @@ mod control_tests {
             control_command(&[1, 42, 0, 1, 255]),
             Some((42, ControlCommand::Info(255)))
         );
+        assert_eq!(
+            control_command(&[1, 42, 0, 8, 6]),
+            Some((42, ControlCommand::Remembered(6)))
+        );
+        assert!(control_command(&[1, 42, 0, 8, 7]).is_none());
+        assert_eq!(
+            control_command(&[1, 42, 0, 9, 4, 1, 2, 3, 4, 5, 6]),
+            Some((42, ControlCommand::Forget(4, [1, 2, 3, 4, 5, 6])))
+        );
+        assert_eq!(
+            control_command(&[1, 42, 0, 11, 2, 1, 2, 3, 4, 5, 6]),
+            Some((42, ControlCommand::PowerOff(2, [1, 2, 3, 4, 5, 6])))
+        );
         let mut rename = vec![1, 4, 0, 3, 1, 1, 2, 3, 4, 5, 6];
         rename.extend_from_slice("Living Room".as_bytes());
         assert_eq!(
@@ -578,6 +611,15 @@ mod control_tests {
             Some((
                 4,
                 ControlCommand::Rename(1, [1, 2, 3, 4, 5, 6], "Living Room".into())
+            ))
+        );
+        let mut rename_remembered = vec![1, 4, 0, 10, 6, 1, 2, 3, 4, 5, 6];
+        rename_remembered.extend_from_slice("White".as_bytes());
+        assert_eq!(
+            control_command(&rename_remembered),
+            Some((
+                4,
+                ControlCommand::RenameRemembered(6, [1, 2, 3, 4, 5, 6], "White".into())
             ))
         );
         for name in [

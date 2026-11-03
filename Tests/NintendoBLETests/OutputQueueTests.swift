@@ -2,7 +2,7 @@ import XCTest
 @testable import NintendoBLE
 
 final class OutputQueueTests: XCTestCase {
-    @MainActor func testFairSlotsKeepFragmentsTogetherAndManagementHasPriority() throws {
+    @MainActor func testFairSlotsKeepFragmentsTogetherAndManagementGetsATurn() throws {
         let queue = ReportWriteQueue<String>()
         try queue.enqueue(destination: "wii", frames: [Data([1]), Data([2])], kind: .wii(0))
         try queue.enqueue(destination: "wii", frames: [Data([5])], kind: .wii(0))
@@ -15,7 +15,23 @@ final class OutputQueueTests: XCTestCase {
             XCTAssertNil(queue.next(now: 0, canSend: { _ in true }))
             queue.acknowledge(destination: frame.destination, error: nil, retryable: false, now: 0)
         }
-        XCTAssertEqual(values, [0, 1, 2, 3, 4, 5])
+        XCTAssertEqual(values, [1, 2, 3, 4, 5, 0])
+    }
+
+    @MainActor func testManagementCannotStarveWiiSetup() throws {
+        let queue = ReportWriteQueue<String>()
+        for value: UInt8 in 10...12 {
+            try queue.enqueue(destination: "management", frames: [Data([value])], kind: .management(UInt16(value)))
+        }
+        for value: UInt8 in 1...8 {
+            try queue.enqueue(destination: "wii", frames: [Data([value])], kind: .wii((value - 1) % 4))
+        }
+        var values: [UInt8] = []
+        while let frame = queue.next(now: 0, canSend: { _ in true }) {
+            values.append(frame.value.first!)
+            queue.acknowledge(destination: frame.destination, error: nil, retryable: false, now: 0)
+        }
+        XCTAssertEqual(values, [1, 2, 3, 4, 10, 5, 6, 7, 8, 11, 12])
     }
 
     @MainActor func testResourceRejectionRestartsWholeReportWithBoundedBackoff() throws {

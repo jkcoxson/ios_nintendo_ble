@@ -32,6 +32,7 @@ final class ReportWriteQueue<Destination: Equatable> {
     private var active: Report?
     private var inFlight = false
     private var lastSlot: UInt8 = 3
+    private var wiiReportsSinceManagement = 0
     private(set) var retryAt: TimeInterval = 0
     var count: Int { queued.reduce(0) { $0 + $1.frames.count } + (active?.frames.count ?? 0) }
 
@@ -47,19 +48,31 @@ final class ReportWriteQueue<Destination: Equatable> {
     func next(now: TimeInterval, canSend: (Destination) -> Bool) -> Frame? {
         guard !inFlight, now >= retryAt else { return nil }
         if active == nil {
-            // Management and setup are short; otherwise rotate slots, preserving
-            // command order within each remote and keeping report fragments together.
-            var selected = queued.firstIndex { $0.kind.slot == nil }
+            // Setup precedes traffic. Rotate Wii slots and give management one
+            // turn after four Wii reports so metadata cannot stall HID setup.
+            var selected = queued.firstIndex { $0.kind == .setup }
             if selected == nil {
+                var nextWii: Int?
                 for offset: UInt8 in 1...4 {
                     if let index = queued.firstIndex(where: { $0.kind.slot == (lastSlot + offset) % 4 }) {
-                        selected = index; break
+                        nextWii = index; break
                     }
                 }
+                let nextManagement = queued.firstIndex {
+                    if case .management = $0.kind { return true }
+                    return false
+                }
+                selected = nextManagement != nil && (nextWii == nil || wiiReportsSinceManagement >= 4)
+                    ? nextManagement : nextWii
             }
             guard let selected else { return nil }
             active = queued.remove(at: selected)
-            if let slot = active?.kind.slot { lastSlot = slot }
+            if let slot = active?.kind.slot {
+                lastSlot = slot
+                wiiReportsSinceManagement += 1
+            } else if case .management = active?.kind {
+                wiiReportsSinceManagement = 0
+            }
         }
         guard let report = active, canSend(report.destination) else { return nil }
         inFlight = true

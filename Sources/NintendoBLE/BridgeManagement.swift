@@ -39,6 +39,34 @@ public struct BridgeDeviceInfo: Sendable, Equatable {
     }
 }
 
+/// A saved Wii Remote identity. `slot` is nil while another remote uses its slot.
+public struct BridgeRememberedRemote: Sendable, Equatable, Identifiable {
+    public let index: UInt8
+    public let slot: UInt8?
+    public let address: Data
+    public let name: String
+    public var id: Data { address }
+
+    init(data: Data) throws {
+        let b = Array(data)
+        guard b.count >= 9, b[0] < 7, b[1] < 4 || b[1] == 255,
+              b[2..<8].contains(where: { $0 != 0 }),
+              let name = String(bytes: b.dropFirst(8), encoding: .utf8),
+              BridgeDeviceInfo.validName(name) else {
+            throw BridgeManagementError.invalidResponse
+        }
+        index = b[0]
+        slot = b[1] == 255 ? nil : b[1]
+        address = Data(b[2..<8])
+        self.name = name
+    }
+
+    public func renamed(_ name: String) throws -> Self {
+        guard BridgeDeviceInfo.validName(name) else { throw BridgeManagementError.invalidName }
+        return try Self(data: Data([index, slot ?? 255]) + address + Data(name.utf8))
+    }
+}
+
 /// One in-flight management command per bridge. Replies confirm persistence, not just GATT delivery.
 @MainActor
 final class BridgeManagementSession {

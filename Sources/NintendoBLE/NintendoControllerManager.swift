@@ -59,6 +59,8 @@ public final class NintendoControllerManager: NSObject {
         var status: BridgeStatus?
         var remotes: [UInt8: WiiRemoteSession] = [:]
         var capabilitiesPending = false
+        var rosterSupported = false
+        var powerOffSupported = false
         var playerStatusExpected = false
         var initialized = false
         var ready = false
@@ -220,6 +222,44 @@ public final class NintendoControllerManager: NSObject {
     }
     public func supportsRemoteControl(_ id: UUID) -> Bool {
         sessions[id]?.ready == true && sessions[id]?.characteristics[CBUUID(string: BridgeProtocol.capabilitiesUUID)] != nil
+    }
+    public func supportsRememberedRemotes(_ id: UUID) -> Bool {
+        sessions[id]?.ready == true && sessions[id]?.rosterSupported == true
+    }
+    public func supportsRemotePowerOff(_ id: UUID) -> Bool {
+        sessions[id]?.ready == true && sessions[id]?.powerOffSupported == true
+    }
+    /// Lists all saved remotes, including those without one of the four assigned slots.
+    public func rememberedRemotes(via id: UUID) async throws -> [BridgeRememberedRemote] {
+        guard supportsRememberedRemotes(id) else { throw BridgeManagementError.unsupported }
+        var remotes: [BridgeRememberedRemote] = []
+        for index: UInt8 in 0..<7 {
+            do {
+                let remote = try BridgeRememberedRemote(
+                    data: await management(id).request(8, payload: Data([index]))
+                )
+                guard remote.index == index else { throw BridgeManagementError.invalidResponse }
+                remotes.append(remote)
+            } catch BridgeManagementError.rejected(2) {
+                continue
+            }
+        }
+        return remotes
+    }
+    public func renameRememberedRemote(_ remote: BridgeRememberedRemote, name: String, via id: UUID) async throws {
+        guard supportsRememberedRemotes(id) else { throw BridgeManagementError.unsupported }
+        guard BridgeDeviceInfo.validName(name) else { throw BridgeManagementError.invalidName }
+        _ = try await management(id).request(10, payload: Data([remote.index]) + remote.address + Data(name.utf8))
+    }
+    /// Forgetting restarts the bridge to release ESP-IDF's saved HID host entry.
+    public func forgetRememberedRemote(_ remote: BridgeRememberedRemote, via id: UUID) async throws {
+        guard supportsRememberedRemotes(id) else { throw BridgeManagementError.unsupported }
+        _ = try await management(id).request(9, payload: Data([remote.index]) + remote.address)
+    }
+    /// Drops the physical HID link after the emulated Wii disconnects, leaving the bond intact.
+    public func powerOffRemote(_ remote: BridgeDeviceInfo, slot: UInt8, via id: UUID) async throws {
+        guard supportsRemotePowerOff(id), slot < 4 else { throw BridgeManagementError.unsupported }
+        _ = try await management(id).request(11, payload: Data([slot]) + remote.address)
     }
     public func playerState(via id: UUID) async throws -> BridgePlayerState {
         guard supportsRemoteControl(id) else { throw BridgeManagementError.unsupported }
@@ -534,6 +574,8 @@ extension NintendoControllerManager: @preconcurrency CBPeripheralDelegate {
             if characteristic.uuid == CBUUID(string: BridgeProtocol.capabilitiesUUID) {
                 guard data.count == 1 else { fail(s, "Invalid bridge capabilities"); return }
                 s.capabilitiesPending = false
+                s.rosterSupported = data[0] & 32 != 0
+                s.powerOffSupported = data[0] & 64 != 0
                 s.playerStatusExpected = data[0] & 16 != 0
                 if characteristic.properties.contains(.write) {
                     do {

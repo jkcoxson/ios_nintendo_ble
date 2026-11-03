@@ -2,6 +2,16 @@ import XCTest
 @testable import NintendoBLE
 
 final class BridgeManagementTests: XCTestCase {
+    func testRememberedRemoteIdentityAndSlot() throws {
+        let address = Data([1, 2, 3, 4, 5, 6])
+        let remote = try BridgeRememberedRemote(data: Data([4, 255]) + address + Data("White".utf8))
+        XCTAssertEqual(remote.index, 4)
+        XCTAssertNil(remote.slot)
+        XCTAssertEqual(remote.address, address)
+        XCTAssertEqual(remote.name, "White")
+        XCTAssertEqual(try remote.renamed("Mario").name, "Mario")
+        XCTAssertThrowsError(try BridgeRememberedRemote(data: Data([7, 0]) + address + Data("Bad".utf8)))
+    }
     @MainActor func testReplyDeadlineStartsAfterTransmission() async throws {
         var transmitted: (@MainActor () -> Void)?
         var request: Data?

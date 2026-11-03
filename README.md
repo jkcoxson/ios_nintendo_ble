@@ -69,7 +69,7 @@ Use `wiiRemote(slot:via:)` for optional acceleration calibration and IR initiali
 2. Within 30 seconds, press the red **SYNC** button under the remote's battery cover. The 1+2 guest pairing procedure is unsupported.
 3. Later, wake the remembered remote with a normal button press. It initiates reconnection to the bridge.
 
-The bridge remembers up to seven remotes across reboots. Pair additional remotes while fewer than four are connected. A remembered remote can take a free live slot when it wakes, and its saved name follows its Bluetooth address. Once four remotes are connected, further connections wait until a slot is free. To forget remotes after the roster fills, clear the bridge's NVS partition deliberately. The firmware recognizes `Nintendo RVL-CNT-01` and `Nintendo RVL-CNT-01-TR`; other models and four simultaneous remotes need hardware validation.
+The bridge remembers up to seven remotes across reboots. Pair additional remotes while fewer than four are connected. A remembered remote can take a free live slot when it wakes, and its saved name follows its Bluetooth address. Once four remotes are connected, further connections wait until a slot is free. Firmware with the remembered-remote management extension can list, rename, and forget all seven saved remotes, including ones without an assigned live slot. Forgetting one restarts the bridge so the HID host releases its device entry. The firmware recognizes `Nintendo RVL-CNT-01` and `Nintendo RVL-CNT-01-TR`; other models and four simultaneous remotes need hardware validation.
 
 ## Build and flash the bridge
 

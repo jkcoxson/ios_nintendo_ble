@@ -24,6 +24,7 @@ pub enum Event {
     HostStopped(u32),
     Acl(Address, bool, u32),
     Discovered(Address, String, bool),
+    RemoteNameFailed(Address, u32),
     DiscoveryStopped,
     Pin(Address, bool),
     Auth(Address, u32),
@@ -110,6 +111,8 @@ unsafe extern "C" fn gap_callback(event: esp_bt_gap_cb_event_t, param: *mut esp_
             let d = p.read_rmt_name;
             if d.stat == esp_bt_status_t_ESP_BT_STATUS_SUCCESS {
                 emit(Event::Discovered(d.bda, name(&d.rmt_name), true));
+            } else {
+                emit(Event::RemoteNameFailed(d.bda, d.stat));
             }
         }
         esp_bt_gap_cb_event_t_ESP_BT_GAP_DISC_STATE_CHANGED_EVT => {
@@ -339,6 +342,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut authenticated = HashSet::<Address>::new();
     let mut candidates = HashSet::<Address>::new();
     let mut asked_names = HashSet::<Address>::new();
+    let mut seen_discovery = HashSet::<Address>::new();
+    let mut pending_name: Option<Address> = None;
+    let mut reading_name = false;
     let mut pending: Option<(Address, Instant)> = None;
     let mut queued_connect: Option<Address> = None;
     let mut incoming = HashSet::<Address>::new();
@@ -356,8 +362,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut max_queue_age = [0u32; 4];
     let mut buttons = [0u16; 4];
     let mut last_input_log = Instant::now();
+    let mut restart_at: Option<Instant> = None;
 
     loop {
+        if restart_at.is_some_and(|when| Instant::now() >= when) {
+            log::info!("Restarting bridge after forgetting a remote");
+            unsafe { esp_restart() };
+        }
         server.poll_control();
         server.poll_input_replies();
         server.poll_samples();
@@ -409,16 +420,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         incoming.remove(&addr);
                     }
                 }
-                Event::Discovered(mut addr, device_name, hid) if open => {
+                Event::Discovered(addr, device_name, hid) if open => {
+                    if pending_name == Some(addr) && !device_name.is_empty() {
+                        pending_name = None;
+                        reading_name = false;
+                    }
+                    if seen_discovery.insert(addr) {
+                        log::info!(
+                            "Pairing discovery {addr:02x?}: name={device_name:?}, hid={hid}"
+                        );
+                    }
                     if device_name.is_empty()
                         && hid
+                        && pending_name.is_none()
                         && asked_names.len() < 16
                         && asked_names.insert(addr)
                     {
-                        check(
-                            unsafe { esp_bt_gap_read_remote_name(addr.as_mut_ptr()) },
-                            "Read Wii name",
-                        );
+                        pending_name = Some(addr);
+                        if discovering {
+                            check(
+                                unsafe { esp_bt_gap_cancel_discovery() },
+                                "Pause inquiry for Wii name",
+                            );
+                        }
                     } else if is_wii(&device_name) {
                         if candidates.len() < 8 {
                             candidates.insert(addr);
@@ -438,6 +462,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             && host_ready
                             && queued_connect.is_none()
                         {
+                            log::info!("Queue discovered Wii {addr:02x?} for HID connect");
                             queued_connect = Some(addr);
                             if discovering {
                                 check(unsafe { esp_bt_gap_cancel_discovery() }, "Pause inquiry");
@@ -445,20 +470,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                Event::DiscoveryStopped => discovering = false,
+                Event::RemoteNameFailed(addr, status) => {
+                    log::warn!("Pairing remote-name read failed for {addr:02x?}: status={status}");
+                    if pending_name == Some(addr) {
+                        pending_name = None;
+                        reading_name = false;
+                    }
+                }
+                Event::DiscoveryStopped => {
+                    discovering = false;
+                    if open {
+                        log::info!("Pairing inquiry stopped");
+                    }
+                }
                 Event::Pin(mut addr, min16) => {
+                    let remembered_remote = protocol::remembered_index(&remembered, addr).is_some();
+                    let candidate = candidates.contains(&addr);
+                    let roster_room = remembered.iter().any(Option::is_none);
+                    let slot = protocol::available_remote_slot(
+                        &known,
+                        addr,
+                        connected.load(Ordering::Relaxed),
+                        suspended,
+                    );
                     let allowed = !min16
-                        && (protocol::remembered_index(&remembered, addr).is_some()
-                            || (open
-                                && candidates.contains(&addr)
-                                && remembered.iter().any(Option::is_none)))
-                        && protocol::available_remote_slot(
-                            &known,
-                            addr,
-                            connected.load(Ordering::Relaxed),
-                            suspended,
-                        )
-                        .is_some();
+                        && (remembered_remote || (open && candidate && roster_room))
+                        && slot.is_some();
+                    log::info!(
+                        "Wii PIN {addr:02x?}: allowed={allowed}, pairing={open}, candidate={candidate}, remembered={remembered_remote}, roster_room={roster_room}, slot={slot:?}, min16={min16}"
+                    );
                     check(
                         unsafe {
                             esp_bt_gap_pin_reply(
@@ -474,6 +514,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Auth(addr, status) => {
                     if status == esp_bt_status_t_ESP_BT_STATUS_SUCCESS {
                         authenticated.insert(addr);
+                        log::info!("Wii authentication succeeded for {addr:02x?}");
                     } else {
                         log::warn!("Wii authentication failed: {status}; use red SYNC, not 1+2");
                     }
@@ -537,6 +578,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         suspended,
                     );
                     if !allowed || slot.is_none() {
+                        log::warn!(
+                            "Reject Wii HID {addr:02x?}: allowed={allowed}, slot={slot:?}, pairing={open}, candidate={}, authenticated={}",
+                            candidates.contains(&addr),
+                            authenticated.contains(&addr)
+                        );
                         disconnect(addr);
                         continue;
                     }
@@ -642,6 +688,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 pairing.store(true, Ordering::Relaxed);
                                 asked_names.clear();
                                 candidates.clear();
+                                seen_discovery.clear();
+                                pending_name = None;
+                                reading_name = false;
                                 server.update_status();
                                 log::info!("Pairing window opened by BLE consumer for 30 seconds");
                             }
@@ -705,6 +754,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     last_reconnect = Instant::now() - Duration::from_secs(4);
                                 }
                             }
+                            ControlCommand::PowerOff(target, address) => {
+                                let slot = target as usize;
+                                if known[slot] != Some(address) || handles[slot].is_none() {
+                                    result = 2;
+                                } else if !disconnect(address) {
+                                    result = 4;
+                                } else {
+                                    // The emulated Wii ended its link. Release the physical
+                                    // HID link too, but keep the bond and allow button wake.
+                                    connect_until[slot] = None;
+                                    rumbling[slot] = false;
+                                    server.clear_remote_reports(target);
+                                    handles[slot] = None;
+                                    connected.fetch_and(!(1 << target), Ordering::Relaxed);
+                                    server.update_status();
+                                    log::info!("Wii Remote in slot {target} powered off by emulated software");
+                                }
+                            }
                             ControlCommand::Info(target) => {
                                 if target == protocol::BRIDGE_TARGET {
                                     payload.push(target);
@@ -724,6 +791,76 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     });
                                 } else {
                                     result = 2;
+                                }
+                            }
+                            ControlCommand::Remembered(index) => {
+                                if let Some(address) = remembered[index as usize] {
+                                    payload.push(index);
+                                    payload.push(
+                                        known
+                                            .iter()
+                                            .position(|slot| *slot == Some(address))
+                                            .map(|slot| slot as u8)
+                                            .unwrap_or(u8::MAX),
+                                    );
+                                    payload.extend_from_slice(&address);
+                                    let name = &remote_names[index as usize];
+                                    let fallback = format!("Wii Remote {}", index + 1);
+                                    payload.extend_from_slice(if name.is_empty() {
+                                        fallback.as_bytes()
+                                    } else {
+                                        name.as_bytes()
+                                    });
+                                } else {
+                                    result = 2;
+                                }
+                            }
+                            ControlCommand::Forget(index, address) => {
+                                if remembered[index as usize] != Some(address) {
+                                    result = 2;
+                                } else {
+                                    let mut removed = remembered;
+                                    removed[index as usize] = None;
+                                    let roster_bytes: Vec<u8> = removed
+                                        .iter()
+                                        .flat_map(|entry| entry.unwrap_or([0; 6]))
+                                        .collect();
+                                    let mut assigned = known;
+                                    for slot in &mut assigned {
+                                        if *slot == Some(address) {
+                                            *slot = None;
+                                        }
+                                    }
+                                    let slot_bytes: Vec<u8> = assigned
+                                        .iter()
+                                        .flat_map(|entry| entry.unwrap_or([0; 6]))
+                                        .collect();
+                                    let mut bond_address = address;
+                                    if !check(
+                                        unsafe {
+                                            esp_bt_gap_remove_bond_device(bond_address.as_mut_ptr())
+                                        },
+                                        "Forget Wii bond",
+                                    ) || storage.set_blob("roster", &roster_bytes).is_err()
+                                        || storage.set_blob("remotes", &slot_bytes).is_err()
+                                        || storage.remove(&format!("rname{index}")).is_err()
+                                    {
+                                        result = 3;
+                                    } else {
+                                        log::info!(
+                                            "Forgot Wii Remote {address:02x?}; bridge will restart"
+                                        );
+                                        restart_at = Some(Instant::now() + Duration::from_secs(3));
+                                    }
+                                }
+                            }
+                            ControlCommand::RenameRemembered(index, address, name) => {
+                                if remembered[index as usize] != Some(address) {
+                                    result = 2;
+                                } else if storage.set_str(&format!("rname{index}"), &name).is_ok() {
+                                    remote_names[index as usize] = name;
+                                } else {
+                                    result = 3;
                                 }
                             }
                             ControlCommand::Rename(target, address, name) => {
@@ -769,6 +906,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         server.poll_control();
         server.poll_input_replies();
         server.poll_samples();
+        if open && !discovering && !reading_name {
+            if let Some(mut addr) = pending_name {
+                if check(
+                    unsafe { esp_bt_gap_read_remote_name(addr.as_mut_ptr()) },
+                    "Read Wii name after inquiry",
+                ) {
+                    log::info!("Reading Wii name after inquiry for {addr:02x?}");
+                    reading_name = true;
+                } else {
+                    pending_name = None;
+                }
+            }
+        }
         if last_input_log.elapsed() >= Duration::from_secs(5) {
             for slot in 0..4 {
                 if handles[slot].is_some() {
@@ -826,6 +976,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             && !discovering
             && pending.is_none()
             && queued_connect.is_none()
+            && pending_name.is_none()
             && incoming.is_empty()
             && last_inquiry.elapsed() > Duration::from_secs(1)
         {
@@ -839,6 +990,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 "Start inquiry",
             );
+            if discovering {
+                log::info!("Pairing inquiry started");
+            }
             last_inquiry = Instant::now();
         }
         if !open
